@@ -8,9 +8,9 @@ console.log("=== Running Headerlock Performance Pass Verification Suite ===\n");
 
 // 1. Cache Buster Verification
 const html = fs.readFileSync("index.html", "utf8");
-assert.ok(html.includes("app.js?v=7.7.0"), "FAIL: app.js must have v=7.7.0");
-assert.ok(html.includes("styles.css?v=7.7.0"), "FAIL: styles.css must have v=7.7.0");
-console.log("✓ Cache Buster: index.html correctly bumped to v=7.7.0");
+assert.ok(html.includes("app.js?v=7.8.0"), "FAIL: app.js must have v=7.8.0");
+assert.ok(html.includes("styles.css?v=7.8.0"), "FAIL: styles.css must have v=7.8.0");
+console.log("✓ Cache Buster: index.html correctly bumped to v=7.8.0");
 
 // 2. Code Inspection for Performance Directives in app.js
 const appJs = fs.readFileSync("app.js", "utf8");

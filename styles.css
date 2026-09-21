@@ -937,7 +937,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
   background: rgba(239, 68, 68, 0.08);
 }
 
-/* ── Studio Stage (Right Canvas Area - Zero Scroll at 100% Zoom) ── */
+/* ── Studio Stage (Right Canvas Area) ── */
 .studio-stage {
   flex: 1;
   min-width: 0;
@@ -947,41 +947,42 @@ input[type="range"]::-webkit-slider-thumb:hover {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   background: transparent;
 }
 
 .views-container {
   display: flex;
   width: 100%;
-  max-width: 1380px;
+  max-width: 1400px;
   margin: 0 auto;
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* ── Mode 1: BOTH (Side-by-side, Desktop has significantly more LENGTH, Mobile is compact, zero scroll) ── */
+/* ── Mode 1: BOTH (Side-by-side, balanced proportions) ── */
 .views-container.view-both {
   flex-direction: row;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   gap: 24px;
 }
 
 .views-container.view-both .card.desktop-view {
-  flex: 1.55;
-  max-width: 840px;
-  min-width: 480px;
+  flex: 1.35;
+  max-width: 800px;
+  min-width: 440px;
   display: flex;
 }
 
 .views-container.view-both .card.mobile-view {
-  flex: 0.9;
-  max-width: 450px;
-  min-width: 300px;
+  flex: 1.05;
+  max-width: 520px;
+  min-width: 320px;
   display: flex;
 }
 
-/* ── Mode 2: DESKTOP ONLY (Focus mode, MUCH LARGER and main view) ── */
+/* ── Mode 2: DESKTOP ONLY (Focus mode, widescreen showcase) ── */
 .views-container.view-desktop {
   flex-direction: column;
   align-items: center;
@@ -998,7 +999,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
   max-width: 1160px;
 }
 
-/* ── Mode 3: MOBILE ONLY (Focus mode, MUCH LARGER and main view) ── */
+/* ── Mode 3: MOBILE ONLY (Focus mode, MUCH LARGER showcase) ── */
 .views-container.view-mobile {
   flex-direction: column;
   align-items: center;
@@ -1012,7 +1013,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .views-container.view-mobile .card.mobile-view {
   display: flex;
   width: 100%;
-  max-width: 620px;
+  max-width: 900px;
 }
 
 

@@ -28,9 +28,9 @@ const offBtnMatch = html.match(/<button id="guideOverlayOff" class="([^"]+)"/);
 assert.ok(offBtnMatch && offBtnMatch[1].includes("active"), "FAIL: guideOverlayOff must be active by default");
 console.log("✓ DOM verification: Default state is strictly OFF by default");
 
-// Verify cache buster bumped to v=7.7.0
-assert.ok(html.includes("v=7.7.0"), "FAIL: Cache buster v=7.7.0 missing in index.html");
-console.log("✓ Cache buster verification: index.html correctly bumped to v=7.7.0");
+// Verify cache buster bumped to v=7.8.0
+assert.ok(html.includes("v=7.8.0"), "FAIL: Cache buster v=7.8.0 missing in index.html");
+console.log("✓ Cache buster verification: index.html correctly bumped to v=7.8.0");
 
 // 2. Mathematical Vector Verification
 const desktopRect = { x: 0, y: 0, width: 1500, height: 500 };
