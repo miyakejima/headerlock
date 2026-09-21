@@ -21,6 +21,7 @@ const state = {
   target: "shared",      // "shared" | "desktop" | "mobile"
   shape: "circle",       // "circle" | "square"
   extend: true,          // Extend banner features below the boundary
+  featureSnap: false,    // Optional 2D feature snapping + seam masking (Shared mode)
   view: "both",          // "both" | "desktop" | "mobile"
   
   // Transforms
@@ -388,7 +389,7 @@ function updateWorkingBanner() {
 }
 
 // ── Fast Seam Score Evaluation ─────────────────────────────────
-function evaluateSeamScore(banner, candidateMapping, expectedMapping, fill) {
+function evaluateSeamScore(banner, candidateMapping, expectedMapping, fill, maskVisibleOnly = false) {
   const rings = [
     { radius: 0.86, weight: 0.14 },
     { radius: 0.91, weight: 0.20 },
@@ -404,10 +405,16 @@ function evaluateSeamScore(banner, candidateMapping, expectedMapping, fill) {
       const angle = (idx / angles) * Math.PI * 2;
       const qx = Math.cos(angle) * ring.radius;
       const qy = Math.sin(angle) * ring.radius;
-      const ax = candidateMapping.centerX + qx * candidateMapping.radiusX;
-      const ay = candidateMapping.centerY + qy * candidateMapping.radiusY;
       const ex = expectedMapping.centerX + qx * expectedMapping.radiusX;
       const ey = expectedMapping.centerY + qy * expectedMapping.radiusY;
+
+      // When maskVisibleOnly is true, only evaluate angles where the avatar physically touches the banner seam
+      if (maskVisibleOnly && (ey > banner.height || ey < 0 || ex < 0 || ex > banner.width)) {
+        continue;
+      }
+
+      const ax = candidateMapping.centerX + qx * candidateMapping.radiusX;
+      const ay = candidateMapping.centerY + qy * candidateMapping.radiusY;
       const cAct = sampleBannerWithContinuation(banner, ax, ay, null, fill);
       const cExp = sampleBannerWithContinuation(banner, ex, ey, null, fill);
       const d = (Math.abs(cAct[0] - cExp[0]) + Math.abs(cAct[1] - cExp[1]) + Math.abs(cAct[2] - cExp[2])) / 3;
@@ -420,46 +427,123 @@ function evaluateSeamScore(banner, candidateMapping, expectedMapping, fill) {
 }
 
 // ── Global Dual-Seam Optimizer ─────────────────────────────────
-function findOptimalSharedMapping(banner, dMap, mMap, fill) {
-  let bestWeight = 0.5;
-  let bestObjective = -Infinity;
-  let bestD = 0;
-  let bestM = 0;
+function findOptimalSharedMapping(banner, dMap, mMap, fill, useFeatureSnap = false) {
+  if (!useFeatureSnap) {
+    let bestWeight = 0.5;
+    let bestObjective = -Infinity;
+    let bestD = 0;
+    let bestM = 0;
 
+    for (let i = 0; i <= 20; i++) {
+      const w = i / 20;
+      const candidate = interpolateSourceMappings(mMap, dMap, w);
+      const dScore = evaluateSeamScore(banner, candidate, dMap, fill);
+      const mScore = evaluateSeamScore(banner, candidate, mMap, fill);
+      const objective = Math.min(dScore, mScore) * 1000 + (dScore + mScore);
+      if (objective > bestObjective) {
+        bestObjective = objective;
+        bestWeight = w;
+        bestD = dScore;
+        bestM = mScore;
+      }
+    }
+
+    // Fine refinement around bestWeight
+    for (let step = -4; step <= 4; step++) {
+      const w = Math.max(0, Math.min(1, bestWeight + step * 0.0125));
+      const candidate = interpolateSourceMappings(mMap, dMap, w);
+      const dScore = evaluateSeamScore(banner, candidate, dMap, fill);
+      const mScore = evaluateSeamScore(banner, candidate, mMap, fill);
+      const objective = Math.min(dScore, mScore) * 1000 + (dScore + mScore);
+      if (objective > bestObjective) {
+        bestObjective = objective;
+        bestWeight = w;
+        bestD = dScore;
+        bestM = mScore;
+      }
+    }
+
+    return {
+      weight: bestWeight,
+      mapping: interpolateSourceMappings(mMap, dMap, bestWeight),
+      desktopScore: bestD,
+      mobileScore: bestM,
+    };
+  }
+
+  // Combined Option A + Option C (Hierarchical 3-Phase Coarse-to-Fine Search)
+  const scoreCandidate = (candidate) => {
+    const dScore = evaluateSeamScore(banner, candidate, dMap, fill, true);
+    const mScore = evaluateSeamScore(banner, candidate, mMap, fill, true);
+    return {
+      dScore,
+      mScore,
+      objective: Math.min(dScore, mScore) * 1000 + (dScore + mScore),
+    };
+  };
+
+  // Phase 1: 1D sweep masked to visible seam
+  let best1D = null;
   for (let i = 0; i <= 20; i++) {
     const w = i / 20;
-    const candidate = interpolateSourceMappings(mMap, dMap, w);
-    const dScore = evaluateSeamScore(banner, candidate, dMap, fill);
-    const mScore = evaluateSeamScore(banner, candidate, mMap, fill);
-    const objective = Math.min(dScore, mScore) * 1000 + (dScore + mScore);
-    if (objective > bestObjective) {
-      bestObjective = objective;
-      bestWeight = w;
-      bestD = dScore;
-      bestM = mScore;
+    const cand = interpolateSourceMappings(mMap, dMap, w);
+    const res = scoreCandidate(cand);
+    if (!best1D || res.objective > best1D.objective) {
+      best1D = { weight: w, cand, ...res };
     }
   }
 
-  // Fine refinement around bestWeight
-  for (let step = -4; step <= 4; step++) {
-    const w = Math.max(0, Math.min(1, bestWeight + step * 0.0125));
-    const candidate = interpolateSourceMappings(mMap, dMap, w);
-    const dScore = evaluateSeamScore(banner, candidate, dMap, fill);
-    const mScore = evaluateSeamScore(banner, candidate, mMap, fill);
-    const objective = Math.min(dScore, mScore) * 1000 + (dScore + mScore);
-    if (objective > bestObjective) {
-      bestObjective = objective;
-      bestWeight = w;
-      bestD = dScore;
-      bestM = mScore;
+  // Phase 2: Coarse 2D local search around best1D (dx, dy in [-16, 16] step 4, dr in [-6, 6] step 3)
+  let bestCoarse = { ...best1D, dx: 0, dy: 0, dr: 0, mapping: best1D.cand };
+  const baseCand = best1D.cand;
+  for (let dx = -16; dx <= 16; dx += 4) {
+    for (let dy = -16; dy <= 16; dy += 4) {
+      for (let dr = -6; dr <= 6; dr += 3) {
+        if (dx === 0 && dy === 0 && dr === 0) continue;
+        const cand = {
+          centerX: baseCand.centerX + dx,
+          centerY: baseCand.centerY + dy,
+          radiusX: baseCand.radiusX + dr,
+          radiusY: baseCand.radiusY + dr,
+        };
+        const res = scoreCandidate(cand);
+        if (res.objective > bestCoarse.objective) {
+          bestCoarse = { weight: best1D.weight, dx, dy, dr, mapping: cand, ...res };
+        }
+      }
+    }
+  }
+
+  // Phase 3: Fine 2D local refinement (dx, dy in [-3, 3] step 1)
+  let bestFine = bestCoarse;
+  for (let fdx = -3; fdx <= 3; fdx += 1) {
+    for (let fdy = -3; fdy <= 3; fdy += 1) {
+      if (fdx === 0 && fdy === 0) continue;
+      const cand = {
+        centerX: bestCoarse.mapping.centerX + fdx,
+        centerY: bestCoarse.mapping.centerY + fdy,
+        radiusX: bestCoarse.mapping.radiusX,
+        radiusY: bestCoarse.mapping.radiusY,
+      };
+      const res = scoreCandidate(cand);
+      if (res.objective > bestFine.objective) {
+        bestFine = {
+          weight: bestCoarse.weight,
+          dx: bestCoarse.dx + fdx,
+          dy: bestCoarse.dy + fdy,
+          dr: bestCoarse.dr,
+          mapping: cand,
+          ...res,
+        };
+      }
     }
   }
 
   return {
-    weight: bestWeight,
-    mapping: interpolateSourceMappings(mMap, dMap, bestWeight),
-    desktopScore: bestD,
-    mobileScore: bestM,
+    weight: bestFine.weight,
+    mapping: bestFine.mapping,
+    desktopScore: bestFine.dScore,
+    mobileScore: bestFine.mScore,
   };
 }
 
@@ -511,26 +595,40 @@ function updateAvatar() {
     state.cropBalance.currentDesktopScore = evaluateSeamScore(state.sceneData, mMap, dMap, fill);
   } else {
     // Shared Mode: High-Precision Dual Seam Optimizer
-    const optimal = findOptimalSharedMapping(state.sceneData, dMap, mMap, fill);
+    const optimal = findOptimalSharedMapping(state.sceneData, dMap, mMap, fill, state.featureSnap);
     state.cropBalance.autoWeight = optimal.weight;
     const effWeight = state.cropBalance.manualWeight !== null
       ? state.cropBalance.manualWeight
       : optimal.weight;
 
-    mapping = interpolateSourceMappings(mMap, dMap, effWeight);
+    if (state.featureSnap && state.cropBalance.manualWeight === null) {
+      mapping = optimal.mapping;
+      activeAvatarGeom = {
+        centerX: optimal.mapping.centerX,
+        centerY: optimal.mapping.centerY,
+        outerRadius: optimal.mapping.radiusX,
+        borderWidth: mGeom.borderWidth * (1 - effWeight) + dGeom.borderWidth * effWeight,
+        padding: 0,
+      };
+      state.cropBalance.currentDesktopScore = optimal.desktopScore;
+      state.cropBalance.currentMobileScore = optimal.mobileScore;
+    } else {
+      mapping = interpolateSourceMappings(mMap, dMap, effWeight);
 
-    // Interpolate avatar geometry too so radius and center are geometrically continuous
-    activeAvatarGeom = {
-      centerX: mMap.centerX * (1 - effWeight) + dMap.centerX * effWeight,
-      centerY: mMap.centerY * (1 - effWeight) + dMap.centerY * effWeight,
-      outerRadius: mGeom.outerRadius * (1 - effWeight) + dGeom.outerRadius * effWeight,
-      borderWidth: mGeom.borderWidth * (1 - effWeight) + dGeom.borderWidth * effWeight,
-      padding: 0,
-    };
+      // Interpolate avatar geometry too so radius and center are geometrically continuous
+      activeAvatarGeom = {
+        centerX: mMap.centerX * (1 - effWeight) + dMap.centerX * effWeight,
+        centerY: mMap.centerY * (1 - effWeight) + dMap.centerY * effWeight,
+        outerRadius: mGeom.outerRadius * (1 - effWeight) + dGeom.outerRadius * effWeight,
+        borderWidth: mGeom.borderWidth * (1 - effWeight) + dGeom.borderWidth * effWeight,
+        padding: 0,
+      };
+
+      state.cropBalance.currentDesktopScore = evaluateSeamScore(state.sceneData, mapping, dMap, fill, state.featureSnap);
+      state.cropBalance.currentMobileScore = evaluateSeamScore(state.sceneData, mapping, mMap, fill, state.featureSnap);
+    }
+
     activeContinuation = effWeight > 0.5 ? desktopContinuation : mobileContinuation;
-
-    state.cropBalance.currentDesktopScore = evaluateSeamScore(state.sceneData, mapping, dMap, fill);
-    state.cropBalance.currentMobileScore = evaluateSeamScore(state.sceneData, mapping, mMap, fill);
   }
 
   state.avatarData = buildAvatar({
@@ -985,6 +1083,12 @@ function updateBalanceUI() {
       statusBadge.style.color = "var(--text-secondary)";
     }
   }
+
+  const isSnap = Boolean(state.featureSnap);
+  $("featureSnapOn")?.classList.toggle("active", isSnap);
+  $("featureSnapOff")?.classList.toggle("active", !isSnap);
+  $("canvasSnapOn")?.classList.toggle("active", isSnap);
+  $("canvasSnapOff")?.classList.toggle("active", !isSnap);
 }
 
 // ── Initialize Event Listeners ─────────────────────────────────
@@ -1102,6 +1206,28 @@ function initEvents() {
   extendOn.addEventListener("click", () => setExtend(true));
   extendOff.addEventListener("click", () => setExtend(false));
 
+  // 2D Feature Snap Switcher [On | Off]
+  const featureSnapOn = $("featureSnapOn");
+  const featureSnapOff = $("featureSnapOff");
+  const canvasSnapOn = $("canvasSnapOn");
+  const canvasSnapOff = $("canvasSnapOff");
+
+  const setFeatureSnap = (enable) => {
+    state.featureSnap = enable;
+    featureSnapOn?.classList.toggle("active", enable);
+    featureSnapOff?.classList.toggle("active", !enable);
+    canvasSnapOn?.classList.toggle("active", enable);
+    canvasSnapOff?.classList.toggle("active", !enable);
+    updateBalanceUI();
+    scheduleRender();
+    showToast(`2D Feature Snap: ${enable ? "On" : "Off"}`);
+  };
+
+  featureSnapOn?.addEventListener("click", () => setFeatureSnap(true));
+  featureSnapOff?.addEventListener("click", () => setFeatureSnap(false));
+  canvasSnapOn?.addEventListener("click", () => setFeatureSnap(true));
+  canvasSnapOff?.addEventListener("click", () => setFeatureSnap(false));
+
   // Reset Bottom Dock Button (Pan & Zoom only)
   // Reset Button (if present)
   $("resetBtn")?.addEventListener("click", () => {
@@ -1109,8 +1235,13 @@ function initEvents() {
     state.panX = 0;
     state.panY = 0;
     state.extend = true;
+    state.featureSnap = false;
     $("extendOn")?.classList.add("active");
     $("extendOff")?.classList.remove("active");
+    $("featureSnapOn")?.classList.remove("active");
+    $("featureSnapOff")?.classList.add("active");
+    $("canvasSnapOn")?.classList.remove("active");
+    $("canvasSnapOff")?.classList.add("active");
     zoomSlider.value = "100";
     zoomValue.textContent = "100%";
     scheduleRender();
@@ -1405,11 +1536,16 @@ function initEvents() {
     syncFxUI();
 
     state.cropBalance.manualWeight = null;
+    state.featureSnap = false;
     updateBalanceUI();
 
     state.extend = true;
     $("extendOn")?.classList.add("active");
     $("extendOff")?.classList.remove("active");
+    $("featureSnapOn")?.classList.remove("active");
+    $("featureSnapOff")?.classList.add("active");
+    $("canvasSnapOn")?.classList.remove("active");
+    $("canvasSnapOff")?.classList.add("active");
 
     state.shape = "circle";
     $("shapeCircle")?.classList.add("active");

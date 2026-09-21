@@ -291,6 +291,14 @@
               Adjusts how the avatar crop balances between Android and Desktop boundaries in Shared mode.
             </p>
 
+            <div class="sidebar-setting-row" style="margin-top: 10px; margin-bottom: 4px;">
+              <span class="setting-label">2D Feature Snap</span>
+              <div class="dock-pills" role="radiogroup" aria-label="2D Feature Snapping">
+                <button id="featureSnapOn" class="dock-pill" type="button" title="Enable angle-masked 2D local seam snapping">On</button>
+                <button id="featureSnapOff" class="dock-pill active" type="button" title="Standard 1D linear compromise">Off</button>
+              </div>
+            </div>
+
             <div class="sidebar-panel-footer">
               <button id="resetCropBalanceBtn" class="flyout-btn-action w-full" type="button">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
@@ -326,6 +334,14 @@
           <div class="dock-pills" role="radiogroup" aria-label="Feature extension below banner edge">
             <button id="extendOn" class="dock-pill active" type="button" title="Extend banner features into lower avatar">On</button>
             <button id="extendOff" class="dock-pill" type="button" title="Cut off at banner bottom edge">Off</button>
+          </div>
+        </div>
+
+        <div class="sidebar-setting-row" id="settingRowCanvasSnap">
+          <span class="setting-label">2D Seam Snap</span>
+          <div class="dock-pills" role="radiogroup" aria-label="2D Seam Snapping in Shared Mode">
+            <button id="canvasSnapOn" class="dock-pill" type="button" title="Enable angle-masked 2D local seam snapping (Shared mode)">On</button>
+            <button id="canvasSnapOff" class="dock-pill active" type="button" title="Standard 1D linear compromise">Off</button>
           </div>
         </div>
       </div>
@@ -390,6 +406,6 @@
   <!-- Clean Toast -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=7.2.0"></script>
+  <script type="module" src="./app.js?v=7.3.0"></script>
 </body>
 </html>
