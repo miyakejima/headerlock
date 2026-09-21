@@ -23,6 +23,7 @@ const state = {
   extend: true,          // Extend banner features below the boundary
   featureSnap: false,    // Optional 2D feature snapping + seam masking (Shared mode)
   blindZoneBridge: false,// Optional Blind-Zone Banner Bridge (Organic & 3D art)
+  guideOverlay: false,   // Optional 12.4° Dual-Lock Guide overlay (Preview only)
   view: "both",          // "both" | "desktop" | "mobile"
   
   // Transforms
@@ -820,6 +821,79 @@ function drawAvatarCircle(ctx, cx, cy, radius, borderWidth = 4, isOverlayBorder 
   }
 }
 
+// ── 12.4° Dual-Lock Guide Overlay (Natural Zero-Seam Alignment Axis) ──
+function drawDualLockGuideOverlay(ctx, scaleRatio = 1, isMobile = false) {
+  if (!state.guideOverlay) return;
+
+  ctx.save();
+  const canvasH = ctx.canvas.height;
+  const slopeDxDy = -20.923978 / 94.890511;
+  const xAtY0 = 210.705 - 500 * slopeDxDy;
+
+  const x0 = xAtY0 * scaleRatio;
+  const y0 = 0;
+  const y1 = canvasH;
+  const x1 = (xAtY0 + (canvasH / scaleRatio) * slopeDxDy) * scaleRatio;
+
+  // 1. Soft glow outer dash
+  ctx.save();
+  ctx.strokeStyle = "rgba(163, 113, 247, 0.35)";
+  ctx.lineWidth = 5 * scaleRatio;
+  ctx.setLineDash([10 * scaleRatio, 8 * scaleRatio]);
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+
+  // 2. High-contrast crisp center dash
+  ctx.strokeStyle = "#c084fc";
+  ctx.lineWidth = 2 * scaleRatio;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  ctx.restore();
+
+  // 3. Mark platform centers along the vector
+  const cdX = 210.705 * scaleRatio;
+  const cdY = 500 * scaleRatio;
+  const cmX = 189.781 * scaleRatio;
+  const cmY = 594.891 * scaleRatio;
+
+  const drawTarget = (cx, cy, label, isCurrent) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 5.5 * scaleRatio, 0, Math.PI * 2);
+    ctx.fillStyle = isCurrent ? "#22c55e" : "rgba(163, 113, 247, 0.85)";
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.5 * scaleRatio;
+    ctx.stroke();
+
+    ctx.font = `600 ${Math.max(10, Math.round(12 * scaleRatio))}px 'JetBrains Mono', monospace`;
+    ctx.fillStyle = isCurrent ? "#22c55e" : "#c084fc";
+    ctx.fillText(label, cx + 12 * scaleRatio, cy + 4 * scaleRatio);
+    ctx.restore();
+  };
+
+  if (!isMobile) {
+    drawTarget(cdX, cdY, "Desktop Center", true);
+    drawTarget(cmX, cmY, "Mobile Center (98px offset)", false);
+  } else {
+    drawTarget(cdX, cdY, "Desktop Center", false);
+    drawTarget(cmX, cmY, "Mobile Center", true);
+  }
+
+  // 4. Subtle angle indicator tag near top
+  ctx.save();
+  ctx.font = `700 ${Math.max(10, Math.round(11 * scaleRatio))}px 'JetBrains Mono', monospace`;
+  ctx.fillStyle = "#c084fc";
+  ctx.fillText("12.4° DUAL-LOCK AXIS", x0 + 10 * scaleRatio, 24 * scaleRatio);
+  ctx.restore();
+
+  ctx.restore();
+}
+
 // ── Render Desktop Preview ─────────────────────────────────────
 function renderDesktop() {
   const isLight = state.theme === "light";
@@ -842,6 +916,11 @@ function renderDesktop() {
 
   // 3. Desktop Avatar: centerX: 210.7, centerY: 500, radius: 166.5
   drawAvatarCircle(desktopCtx, 210.7, 500, 166.5, 8, false);
+
+  // 4. Optional 12.4° Dual-Lock Guide Overlay
+  if (state.guideOverlay) {
+    drawDualLockGuideOverlay(desktopCtx, 1, false);
+  }
 }
 
 // ── Render Mobile Preview ──────────────────────────────────────
@@ -913,6 +992,11 @@ function renderMobile() {
 
   // 6. Draw Mobile Avatar
   drawAvatarCircle(mobileCtx, mGeom.centerX, mGeom.centerY, mGeom.outerRadius, mGeom.borderWidth, true);
+
+  // 7. Optional 12.4° Dual-Lock Guide Overlay
+  if (state.guideOverlay) {
+    drawDualLockGuideOverlay(mobileCtx, w / 1500, true);
+  }
 }
 
 // ── Main Render Pipeline ───────────────────────────────────────
@@ -1185,6 +1269,10 @@ function updateBalanceUI() {
   $("canvasBridgeOn")?.classList.toggle("active", isBridge);
   $("canvasBridgeOff")?.classList.toggle("active", !isBridge);
 
+  const isGuide = Boolean(state.guideOverlay);
+  $("guideOverlayOn")?.classList.toggle("active", isGuide);
+  $("guideOverlayOff")?.classList.toggle("active", !isGuide);
+
   const snapRow = $("settingRowCanvasSnap");
   if (snapRow) snapRow.hidden = !isShared;
   const bridgeRow = $("settingRowCanvasBridge");
@@ -1350,6 +1438,22 @@ function initEvents() {
   canvasBridgeOn?.addEventListener("click", () => setBlindZoneBridge(true));
   canvasBridgeOff?.addEventListener("click", () => setBlindZoneBridge(false));
 
+  // 12.4° Dual-Lock Guide Switcher [On | Off]
+  const guideOverlayOn = $("guideOverlayOn");
+  const guideOverlayOff = $("guideOverlayOff");
+
+  const setGuideOverlay = (enable) => {
+    state.guideOverlay = enable;
+    guideOverlayOn?.classList.toggle("active", enable);
+    guideOverlayOff?.classList.toggle("active", !enable);
+    updateBalanceUI();
+    scheduleRender();
+    showToast(`12.4° Dual Guide: ${enable ? "On" : "Off"}`);
+  };
+
+  guideOverlayOn?.addEventListener("click", () => setGuideOverlay(true));
+  guideOverlayOff?.addEventListener("click", () => setGuideOverlay(false));
+
   // Reset Bottom Dock Button (Pan & Zoom only)
   // Reset Button (if present)
   $("resetBtn")?.addEventListener("click", () => {
@@ -1359,6 +1463,7 @@ function initEvents() {
     state.extend = true;
     state.featureSnap = false;
     state.blindZoneBridge = false;
+    state.guideOverlay = false;
     $("extendOn")?.classList.add("active");
     $("extendOff")?.classList.remove("active");
     $("featureSnapOn")?.classList.remove("active");
@@ -1369,6 +1474,8 @@ function initEvents() {
     $("blindBridgeOff")?.classList.add("active");
     $("canvasBridgeOn")?.classList.remove("active");
     $("canvasBridgeOff")?.classList.add("active");
+    $("guideOverlayOn")?.classList.remove("active");
+    $("guideOverlayOff")?.classList.add("active");
     zoomSlider.value = "100";
     zoomValue.textContent = "100%";
     scheduleRender();
@@ -1678,6 +1785,8 @@ function initEvents() {
     $("blindBridgeOff")?.classList.add("active");
     $("canvasBridgeOn")?.classList.remove("active");
     $("canvasBridgeOff")?.classList.add("active");
+    $("guideOverlayOn")?.classList.remove("active");
+    $("guideOverlayOff")?.classList.add("active");
 
     state.shape = "circle";
     $("shapeCircle")?.classList.add("active");
