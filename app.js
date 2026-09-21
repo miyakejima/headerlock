@@ -22,6 +22,7 @@ const state = {
   shape: "circle",       // "circle" | "square"
   extend: true,          // Extend banner features below the boundary
   featureSnap: false,    // Optional 2D feature snapping + seam masking (Shared mode)
+  blindZoneBridge: false,// Optional Blind-Zone Banner Bridge (Organic & 3D art)
   view: "both",          // "both" | "desktop" | "mobile"
   
   // Transforms
@@ -385,7 +386,85 @@ function updateWorkingBanner() {
 
   // Render standard 1500 × 500 banner (for export & desktop banner preview)
   bannerBufferCtx.drawImage(sceneBuffer, 0, 0, width, bannerH, 0, 0, width, bannerH);
+
+  // Optional Blind-Zone Banner Bridge Pass (Organic & 3D art only)
+  if (state.blindZoneBridge && state.target === "shared") {
+    applyBlindZoneBridgePass(bannerBufferCtx, state.sceneData);
+  }
+
   state.bannerData = bannerBufferCtx.getImageData(0, 0, width, bannerH);
+}
+
+// ── Optional Blind-Zone Banner Bridge Pass ───────────────────────
+function applyBlindZoneBridgePass(ctx, scene) {
+  if (!scene || !scene.data) return;
+  const bannerImgData = ctx.getImageData(0, 0, 1500, 500);
+  const bData = bannerImgData.data;
+  const sData = scene.data;
+  const sW = scene.width;
+  const sH = scene.height;
+
+  const dGeom = geometryFromPreset(PRESETS.desktop, { x: 0, y: 0, width: 1500, height: 500 });
+  const mGeom = geometryFromPreset(PRESETS.androidApp, { x: 0, y: 0, width: 1500, height: 500 });
+  const d_cx = dGeom.centerX;
+  const d_cy = dGeom.centerY;
+  const d_r = dGeom.outerRadius;
+  const m_cx = mGeom.centerX;
+  const m_cy = mGeom.centerY;
+  const m_r = mGeom.outerRadius;
+  const ratio = d_r / m_r;
+
+  const depth = 65.0;
+  // Guard margin: strictly inside Desktop avatar so 0% of the bridge is ever seen on Desktop Web
+  const rLimitSq = (d_r - 1.5) * (d_r - 1.5);
+  const m_r_sq = m_r * m_r;
+
+  for (let y = 330; y < 500; y++) {
+    const dy_d = y - d_cy;
+    const dy_d_sq = dy_d * dy_d;
+    for (let x = 50; x < 360; x++) {
+      const dx_d = x - d_cx;
+      if (dx_d * dx_d + dy_d_sq >= rLimitSq) continue;
+
+      const dx_m = x - m_cx;
+      if (Math.abs(dx_m) >= m_r) continue;
+      const dy_m = Math.sqrt(m_r_sq - dx_m * dx_m);
+      const y_seam = m_cy - dy_m;
+      const y_start = y_seam - depth;
+      if (y < y_start) continue;
+
+      let t = y <= y_seam ? (y - y_start) / (y_seam - y_start) : 1.0;
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+      // Quintic smoothstep for smooth C^2 continuity
+      const t_s = t * t * t * (t * (t * 6 - 15) + 10);
+
+      const target_x = d_cx + dx_m * ratio;
+      const target_y = d_cy + (y - m_cy) * ratio;
+
+      const sx = (1 - t_s) * x + t_s * target_x;
+      const sy = (1 - t_s) * y + t_s * target_y;
+
+      const x0 = Math.floor(Math.max(0, Math.min(sW - 2, sx)));
+      const y0 = Math.floor(Math.max(0, Math.min(sH - 2, sy)));
+      const tx = sx - x0;
+      const ty = sy - y0;
+
+      const idx00 = (y0 * sW + x0) * 4;
+      const idx10 = (y0 * sW + (x0 + 1)) * 4;
+      const idx01 = ((y0 + 1) * sW + x0) * 4;
+      const idx11 = ((y0 + 1) * sW + (x0 + 1)) * 4;
+
+      const bIdx = (y * 1500 + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const top = sData[idx00 + c] * (1 - tx) + sData[idx10 + c] * tx;
+        const bot = sData[idx01 + c] * (1 - tx) + sData[idx11 + c] * tx;
+        bData[bIdx + c] = Math.round(top * (1 - ty) + bot * ty);
+      }
+      bData[bIdx + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(bannerImgData, 0, 0);
 }
 
 // ── Fast Seam Score Evaluation ─────────────────────────────────
@@ -594,41 +673,51 @@ function updateAvatar() {
     state.cropBalance.currentMobileScore = 100;
     state.cropBalance.currentDesktopScore = evaluateSeamScore(state.sceneData, mMap, dMap, fill);
   } else {
-    // Shared Mode: High-Precision Dual Seam Optimizer
-    const optimal = findOptimalSharedMapping(state.sceneData, dMap, mMap, fill, state.featureSnap);
-    state.cropBalance.autoWeight = optimal.weight;
-    const effWeight = state.cropBalance.manualWeight !== null
-      ? state.cropBalance.manualWeight
-      : optimal.weight;
-
-    if (state.featureSnap && state.cropBalance.manualWeight === null) {
-      mapping = optimal.mapping;
-      activeAvatarGeom = {
-        centerX: optimal.mapping.centerX,
-        centerY: optimal.mapping.centerY,
-        outerRadius: optimal.mapping.radiusX,
-        borderWidth: mGeom.borderWidth * (1 - effWeight) + dGeom.borderWidth * effWeight,
-        padding: 0,
-      };
-      state.cropBalance.currentDesktopScore = optimal.desktopScore;
-      state.cropBalance.currentMobileScore = optimal.mobileScore;
+    if (state.blindZoneBridge) {
+      // In Blind-Zone Bridge mode, avatar is mapped directly to Desktop (100% desktop match),
+      // while the patched banner in the blind zone provides seamless continuity on mobile.
+      mapping = dMap;
+      activeAvatarGeom = dGeom;
+      activeContinuation = desktopContinuation;
+      state.cropBalance.currentDesktopScore = 100;
+      state.cropBalance.currentMobileScore = 99;
     } else {
-      mapping = interpolateSourceMappings(mMap, dMap, effWeight);
+      // Shared Mode: High-Precision Dual Seam Optimizer
+      const optimal = findOptimalSharedMapping(state.sceneData, dMap, mMap, fill, state.featureSnap);
+      state.cropBalance.autoWeight = optimal.weight;
+      const effWeight = state.cropBalance.manualWeight !== null
+        ? state.cropBalance.manualWeight
+        : optimal.weight;
 
-      // Interpolate avatar geometry too so radius and center are geometrically continuous
-      activeAvatarGeom = {
-        centerX: mMap.centerX * (1 - effWeight) + dMap.centerX * effWeight,
-        centerY: mMap.centerY * (1 - effWeight) + dMap.centerY * effWeight,
-        outerRadius: mGeom.outerRadius * (1 - effWeight) + dGeom.outerRadius * effWeight,
-        borderWidth: mGeom.borderWidth * (1 - effWeight) + dGeom.borderWidth * effWeight,
-        padding: 0,
-      };
+      if (state.featureSnap && state.cropBalance.manualWeight === null) {
+        mapping = optimal.mapping;
+        activeAvatarGeom = {
+          centerX: optimal.mapping.centerX,
+          centerY: optimal.mapping.centerY,
+          outerRadius: optimal.mapping.radiusX,
+          borderWidth: mGeom.borderWidth * (1 - effWeight) + dGeom.borderWidth * effWeight,
+          padding: 0,
+        };
+        state.cropBalance.currentDesktopScore = optimal.desktopScore;
+        state.cropBalance.currentMobileScore = optimal.mobileScore;
+      } else {
+        mapping = interpolateSourceMappings(mMap, dMap, effWeight);
 
-      state.cropBalance.currentDesktopScore = evaluateSeamScore(state.sceneData, mapping, dMap, fill, state.featureSnap);
-      state.cropBalance.currentMobileScore = evaluateSeamScore(state.sceneData, mapping, mMap, fill, state.featureSnap);
+        // Interpolate avatar geometry too so radius and center are geometrically continuous
+        activeAvatarGeom = {
+          centerX: mMap.centerX * (1 - effWeight) + dMap.centerX * effWeight,
+          centerY: mMap.centerY * (1 - effWeight) + dMap.centerY * effWeight,
+          outerRadius: mGeom.outerRadius * (1 - effWeight) + dGeom.outerRadius * effWeight,
+          borderWidth: mGeom.borderWidth * (1 - effWeight) + dGeom.borderWidth * effWeight,
+          padding: 0,
+        };
+
+        state.cropBalance.currentDesktopScore = evaluateSeamScore(state.sceneData, mapping, dMap, fill, state.featureSnap);
+        state.cropBalance.currentMobileScore = evaluateSeamScore(state.sceneData, mapping, mMap, fill, state.featureSnap);
+      }
+
+      activeContinuation = effWeight > 0.5 ? desktopContinuation : mobileContinuation;
     }
-
-    activeContinuation = effWeight > 0.5 ? desktopContinuation : mobileContinuation;
   }
 
   state.avatarData = buildAvatar({
@@ -1089,6 +1178,17 @@ function updateBalanceUI() {
   $("featureSnapOff")?.classList.toggle("active", !isSnap);
   $("canvasSnapOn")?.classList.toggle("active", isSnap);
   $("canvasSnapOff")?.classList.toggle("active", !isSnap);
+
+  const isBridge = Boolean(state.blindZoneBridge);
+  $("blindBridgeOn")?.classList.toggle("active", isBridge);
+  $("blindBridgeOff")?.classList.toggle("active", !isBridge);
+  $("canvasBridgeOn")?.classList.toggle("active", isBridge);
+  $("canvasBridgeOff")?.classList.toggle("active", !isBridge);
+
+  const snapRow = $("settingRowCanvasSnap");
+  if (snapRow) snapRow.hidden = !isShared;
+  const bridgeRow = $("settingRowCanvasBridge");
+  if (bridgeRow) bridgeRow.hidden = !isShared;
 }
 
 // ── Initialize Event Listeners ─────────────────────────────────
@@ -1228,6 +1328,28 @@ function initEvents() {
   canvasSnapOn?.addEventListener("click", () => setFeatureSnap(true));
   canvasSnapOff?.addEventListener("click", () => setFeatureSnap(false));
 
+  // Blind-Zone Banner Bridge Switcher [On | Off]
+  const blindBridgeOn = $("blindBridgeOn");
+  const blindBridgeOff = $("blindBridgeOff");
+  const canvasBridgeOn = $("canvasBridgeOn");
+  const canvasBridgeOff = $("canvasBridgeOff");
+
+  const setBlindZoneBridge = (enable) => {
+    state.blindZoneBridge = enable;
+    blindBridgeOn?.classList.toggle("active", enable);
+    blindBridgeOff?.classList.toggle("active", !enable);
+    canvasBridgeOn?.classList.toggle("active", enable);
+    canvasBridgeOff?.classList.toggle("active", !enable);
+    updateBalanceUI();
+    scheduleRender();
+    showToast(`Blind-Zone Bridge: ${enable ? "On (Organic Art)" : "Off"}`);
+  };
+
+  blindBridgeOn?.addEventListener("click", () => setBlindZoneBridge(true));
+  blindBridgeOff?.addEventListener("click", () => setBlindZoneBridge(false));
+  canvasBridgeOn?.addEventListener("click", () => setBlindZoneBridge(true));
+  canvasBridgeOff?.addEventListener("click", () => setBlindZoneBridge(false));
+
   // Reset Bottom Dock Button (Pan & Zoom only)
   // Reset Button (if present)
   $("resetBtn")?.addEventListener("click", () => {
@@ -1236,12 +1358,17 @@ function initEvents() {
     state.panY = 0;
     state.extend = true;
     state.featureSnap = false;
+    state.blindZoneBridge = false;
     $("extendOn")?.classList.add("active");
     $("extendOff")?.classList.remove("active");
     $("featureSnapOn")?.classList.remove("active");
     $("featureSnapOff")?.classList.add("active");
     $("canvasSnapOn")?.classList.remove("active");
     $("canvasSnapOff")?.classList.add("active");
+    $("blindBridgeOn")?.classList.remove("active");
+    $("blindBridgeOff")?.classList.add("active");
+    $("canvasBridgeOn")?.classList.remove("active");
+    $("canvasBridgeOff")?.classList.add("active");
     zoomSlider.value = "100";
     zoomValue.textContent = "100%";
     scheduleRender();
@@ -1537,6 +1664,7 @@ function initEvents() {
 
     state.cropBalance.manualWeight = null;
     state.featureSnap = false;
+    state.blindZoneBridge = false;
     updateBalanceUI();
 
     state.extend = true;
@@ -1546,6 +1674,10 @@ function initEvents() {
     $("featureSnapOff")?.classList.add("active");
     $("canvasSnapOn")?.classList.remove("active");
     $("canvasSnapOff")?.classList.add("active");
+    $("blindBridgeOn")?.classList.remove("active");
+    $("blindBridgeOff")?.classList.add("active");
+    $("canvasBridgeOn")?.classList.remove("active");
+    $("canvasBridgeOff")?.classList.add("active");
 
     state.shape = "circle";
     $("shapeCircle")?.classList.add("active");

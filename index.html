@@ -5,17 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
   <title>headerlock · seamless x profile alignment</title>
-  <link rel="icon" type="image/png" href="./assets/icon.png?v=7.2.0" />
-  <link rel="apple-touch-icon" href="./assets/icon.png?v=7.2.0" />
-  <link rel="preload" as="image" href="./assets/default-banner.jpg?v=7.2.0" />
+  <link rel="icon" type="image/png" href="./assets/icon.png?v=7.4.0" />
+  <link rel="apple-touch-icon" href="./assets/icon.png?v=7.4.0" />
+  <link rel="preload" as="image" href="./assets/default-banner.jpg?v=7.4.0" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./styles.css?v=7.2.0" />
+  <link rel="stylesheet" href="./styles.css?v=7.4.0" />
 </head>
 <body>
   <!-- Default Banner Image (Preloaded to eliminate initial render flicker) -->
-  <img id="defaultBannerImg" src="./assets/default-banner.jpg?v=7.2.0" style="display: none;" alt="" />
+  <img id="defaultBannerImg" src="./assets/default-banner.jpg?v=7.4.0" style="display: none;" alt="" />
 
   <!-- Drag and drop full window overlay -->
   <div id="dropOverlay" class="drop-overlay" hidden>
@@ -299,6 +299,17 @@
               </div>
             </div>
 
+            <div class="sidebar-setting-row" style="margin-top: 10px; margin-bottom: 4px;">
+              <div style="display: flex; flex-direction: column;">
+                <span class="setting-label">Blind-Zone Bridge</span>
+                <span style="font-size: 10px; color: var(--text-tertiary); margin-top: 1px;">Organic 3D &amp; Ribbon Art</span>
+              </div>
+              <div class="dock-pills" role="radiogroup" aria-label="Blind-Zone Banner Bridge">
+                <button id="blindBridgeOn" class="dock-pill" type="button" title="Patches banner in Desktop's avatar blind spot for 100% desktop match + 0px mobile seam">On</button>
+                <button id="blindBridgeOff" class="dock-pill active" type="button" title="Standard unwarped banner (Recommended)">Off</button>
+              </div>
+            </div>
+
             <div class="sidebar-panel-footer">
               <button id="resetCropBalanceBtn" class="flyout-btn-action w-full" type="button">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
@@ -342,6 +353,17 @@
           <div class="dock-pills" role="radiogroup" aria-label="2D Seam Snapping in Shared Mode">
             <button id="canvasSnapOn" class="dock-pill" type="button" title="Enable angle-masked 2D local seam snapping (Shared mode)">On</button>
             <button id="canvasSnapOff" class="dock-pill active" type="button" title="Standard 1D linear compromise">Off</button>
+          </div>
+        </div>
+
+        <div class="sidebar-setting-row" id="settingRowCanvasBridge">
+          <div style="display: flex; flex-direction: column;">
+            <span class="setting-label">Blind-Zone Bridge</span>
+            <span style="font-size: 10px; color: var(--text-tertiary); margin-top: 1px;">Organic Art</span>
+          </div>
+          <div class="dock-pills" role="radiogroup" aria-label="Blind-Zone Banner Bridge in Shared Mode">
+            <button id="canvasBridgeOn" class="dock-pill" type="button" title="Patch banner in desktop blind spot (Organic art)">On</button>
+            <button id="canvasBridgeOff" class="dock-pill active" type="button" title="Standard unwarped banner">Off</button>
           </div>
         </div>
       </div>
@@ -406,6 +428,6 @@
   <!-- Clean Toast -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=7.3.0"></script>
+  <script type="module" src="./app.js?v=7.4.0"></script>
 </body>
 </html>
