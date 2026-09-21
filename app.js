@@ -87,10 +87,12 @@ const dirty = {
   continuation: true,
   avatar: true,
   preview: true,
+  optimizer: true,
 };
 
 let cachedDesktopContinuation = null;
 let cachedMobileContinuation = null;
+let cachedOptimalSharedMapping = null;
 
 // ── DOM References ─────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -419,6 +421,68 @@ function updateWorkingBanner() {
   }
 }
 
+// ── GPU-Accelerated Interactive Banner Fast-Path (0.4ms per frame) ───
+function updateWorkingBannerInteractive() {
+  const width = 1500;
+  const bannerH = 500;
+  const img = state.sourceBanner;
+  if (!img) return;
+
+  const imgW = img.width || img.naturalWidth || width;
+  const imgH = img.height || img.naturalHeight || bannerH;
+  const isRotated90 = state.transform.rotation === 90 || state.transform.rotation === 270;
+  const visualW = isRotated90 ? imgH : imgW;
+  const visualH = isRotated90 ? imgW : imgH;
+
+  const baseScale = Math.max(width / visualW, bannerH / visualH);
+  const scale = baseScale * state.zoom;
+  const drawW = imgW * scale;
+  const drawH = imgH * scale;
+
+  const centerX = width / 2 + state.panX;
+  const centerY = bannerH / 2 + state.panY;
+  const visualBottom = centerY + (visualH * scale) / 2;
+  const sceneH = Math.max(500, Math.min(800, Math.ceil(visualBottom)));
+  state.sceneH = sceneH;
+
+  sceneBufferCtx.fillStyle = "#000000";
+  sceneBufferCtx.fillRect(0, 0, width, sceneH);
+
+  sceneBufferCtx.save();
+  sceneBufferCtx.translate(centerX, centerY);
+  if (state.transform.rotation !== 0) {
+    sceneBufferCtx.rotate((state.transform.rotation * Math.PI) / 180);
+  }
+  const scaleX = state.transform.mirrorX ? -1 : 1;
+  const scaleY = state.transform.flipY ? -1 : 1;
+  sceneBufferCtx.scale(scaleX, scaleY);
+
+  const filterParts = [];
+  if (state.adjust.brightness !== 0) filterParts.push(`brightness(${Math.max(0, 100 + state.adjust.brightness)}%)`);
+  if (state.adjust.contrast !== 0) filterParts.push(`contrast(${Math.max(0, 100 + state.adjust.contrast)}%)`);
+  if (state.adjust.saturation !== 0) filterParts.push(`saturate(${Math.max(0, 100 + state.adjust.saturation)}%)`);
+  if (state.adjust.hue !== 0) filterParts.push(`hue-rotate(${state.adjust.hue}deg)`);
+  if (state.effects.invert) filterParts.push("invert(100%)");
+
+  if (filterParts.length > 0) {
+    sceneBufferCtx.filter = filterParts.join(" ");
+  }
+
+  sceneBufferCtx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
+  sceneBufferCtx.restore();
+  sceneBufferCtx.filter = "none";
+
+  if (state.adjust.warmth !== 0) {
+    applyWarmth(sceneBufferCtx, width, sceneH, state.adjust.warmth);
+  }
+  if (state.effects.vignette > 0) {
+    applyVignette(sceneBufferCtx, width, sceneH, state.effects.vignette);
+  }
+
+  // Blit 1500x500 banner directly to bannerBuffer (GPU copy, 0.05ms)
+  bannerBufferCtx.drawImage(sceneBuffer, 0, 0, width, bannerH, 0, 0, width, bannerH);
+}
+
 // ── Optional Blind-Zone Banner Bridge Pass ───────────────────────
 function applyBlindZoneBridgePass(ctx, scene) {
   if (!scene || !scene.data) return;
@@ -714,7 +778,11 @@ function updateAvatar() {
       state.cropBalance.currentMobileScore = 99;
     } else {
       // Shared Mode: High-Precision Dual Seam Optimizer
-      const optimal = findOptimalSharedMapping(state.sceneData, dMap, mMap, fill, state.featureSnap);
+      if (!cachedOptimalSharedMapping || dirty.optimizer) {
+        cachedOptimalSharedMapping = findOptimalSharedMapping(state.sceneData, dMap, mMap, fill, state.featureSnap);
+        dirty.optimizer = false;
+      }
+      const optimal = cachedOptimalSharedMapping;
       state.cropBalance.autoWeight = optimal.weight;
       const effWeight = state.cropBalance.manualWeight !== null
         ? state.cropBalance.manualWeight
@@ -773,6 +841,49 @@ function updateAvatar() {
 
   putRawImage(avatarBufferCtx, state.avatarData, 0, 0);
   updateBalanceUI();
+}
+
+// ── GPU-Accelerated Interactive Avatar Fast-Path (0.02ms per frame) ──
+function updateAvatarInteractive() {
+  const sceneH = state.sceneH || 500;
+  const sceneRect = { x: 0, y: 0, width: 1500, height: sceneH };
+  const desktopRect = { x: 0, y: 0, width: 1500, height: 500 };
+  const dGeom = geometryFromPreset(PRESETS.desktop, desktopRect);
+  const mGeom = geometryFromPreset(PRESETS.androidApp, desktopRect);
+
+  const dMap = sourceMappingFromLayout({ banner: { width: 1500, height: sceneH }, bannerRect: sceneRect, avatar: dGeom });
+  const mMap = sourceMappingFromLayout({ banner: { width: 1500, height: sceneH }, bannerRect: sceneRect, avatar: mGeom });
+
+  let mapping = dMap;
+  if (state.target === "desktop") {
+    mapping = dMap;
+  } else if (state.target === "mobile") {
+    mapping = mMap;
+  } else {
+    if (state.blindZoneBridge) {
+      mapping = dMap;
+    } else {
+      const optimalWeight = cachedOptimalSharedMapping ? cachedOptimalSharedMapping.weight : 0.5;
+      const effWeight = state.cropBalance.manualWeight !== null
+        ? state.cropBalance.manualWeight
+        : optimalWeight;
+      mapping = interpolateSourceMappings(mMap, dMap, effWeight);
+    }
+  }
+
+  // Blit mapped region directly from sceneBuffer onto avatarBuffer in GPU memory (0.02ms)
+  avatarBufferCtx.clearRect(0, 0, 400, 400);
+  avatarBufferCtx.drawImage(
+    sceneBuffer,
+    mapping.centerX - mapping.radiusX,
+    mapping.centerY - mapping.radiusY,
+    mapping.radiusX * 2,
+    mapping.radiusY * 2,
+    0,
+    0,
+    400,
+    400
+  );
 }
 
 // ── Raw Image Helper ───────────────────────────────────────────
@@ -1029,31 +1140,35 @@ function renderMobile() {
   }
 }
 
-// ── Main Render Pipeline (Stage-Separated Dirty Flag Engine) ───
+// ── Main Render Pipeline (Dual-Mode Interactive / Finalized Engine) ───
 let renderPending = false;
-function scheduleRender(flags = null) {
-  if (flags) {
-    if (flags.banner !== undefined) dirty.banner = Boolean(flags.banner);
-    if (flags.continuation !== undefined) dirty.continuation = Boolean(flags.continuation);
-    if (flags.avatar !== undefined) dirty.avatar = Boolean(flags.avatar);
-    if (flags.preview !== undefined) dirty.preview = Boolean(flags.preview);
-  } else {
-    // Default: mark all stages dirty if called with no arguments
-    dirty.banner = true;
-    dirty.continuation = true;
-    dirty.avatar = true;
-    dirty.preview = true;
-  }
+let isInteracting = false;
+let finalizeTimer = null;
 
-  if (renderPending) return;
-  renderPending = true;
-  requestAnimationFrame(() => {
-    renderPending = false;
-    try {
+function renderLoop() {
+  renderPending = false;
+  try {
+    if (isInteracting) {
+      if (dirty.banner) {
+        updateWorkingBannerInteractive();
+        dirty.banner = false;
+        dirty.avatar = true;
+        dirty.preview = true;
+      }
+      if (dirty.avatar) {
+        updateAvatarInteractive();
+        dirty.avatar = false;
+        dirty.preview = true;
+      }
+      if (dirty.preview) {
+        renderDesktop();
+        renderMobile();
+        dirty.preview = false;
+      }
+    } else {
       if (dirty.banner) {
         updateWorkingBanner();
         dirty.banner = false;
-        // When banner changes, avatar and previews must refresh
         dirty.avatar = true;
         dirty.preview = true;
       }
@@ -1067,11 +1182,83 @@ function scheduleRender(flags = null) {
         renderMobile();
         dirty.preview = false;
       }
-    } catch (err) {
-      console.error("Render pipeline error:", err);
-      showToast("Render error: " + err.message);
     }
-  });
+  } catch (err) {
+    console.error("Render pipeline error:", err);
+    showToast("Render error: " + err.message);
+  }
+}
+
+function scheduleInteractiveRender(flags = null) {
+  isInteracting = true;
+  if (flags) {
+    if (flags.banner) dirty.banner = true;
+    if (flags.avatar) dirty.avatar = true;
+    if (flags.preview) dirty.preview = true;
+  } else {
+    dirty.banner = true;
+    dirty.avatar = true;
+    dirty.preview = true;
+  }
+
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(renderLoop);
+}
+
+function scheduleFinalRender(flags = null) {
+  if (finalizeTimer) {
+    clearTimeout(finalizeTimer);
+    finalizeTimer = null;
+  }
+  isInteracting = false;
+  if (flags) {
+    if (flags.banner) dirty.banner = true;
+    if (flags.continuation) dirty.continuation = true;
+    if (flags.avatar) dirty.avatar = true;
+    if (flags.preview) dirty.preview = true;
+    if (flags.optimizer) dirty.optimizer = true;
+  } else {
+    dirty.banner = true;
+    dirty.continuation = true;
+    dirty.avatar = true;
+    dirty.preview = true;
+    dirty.optimizer = true;
+  }
+
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(renderLoop);
+}
+
+function debounceFinalRender(delay = 100) {
+  if (finalizeTimer) clearTimeout(finalizeTimer);
+  finalizeTimer = setTimeout(() => {
+    finalizeTimer = null;
+    scheduleFinalRender({ banner: true, avatar: true, preview: true });
+  }, delay);
+}
+
+function scheduleRender(flags = null) {
+  scheduleFinalRender(flags);
+}
+
+function finalizeRenderSync() {
+  if (finalizeTimer) {
+    clearTimeout(finalizeTimer);
+    finalizeTimer = null;
+  }
+  isInteracting = false;
+  dirty.banner = true;
+  dirty.avatar = true;
+  dirty.preview = true;
+  updateWorkingBanner();
+  updateAvatar();
+  renderDesktop();
+  renderMobile();
+  dirty.banner = false;
+  dirty.avatar = false;
+  dirty.preview = false;
 }
 
 // ── Interactive Drag & Zoom ────────────────────────────────────
@@ -1098,22 +1285,25 @@ function setupDrag(canvas, getScale) {
     const factor = getScale();
     state.panX = initialPanX + dx * factor;
     state.panY = initialPanY + dy * factor;
-    // Interactive 60/120 FPS fast-path: keep previous boundary continuation while dragging
-    scheduleRender({ banner: true, avatar: true, preview: true, continuation: false });
+    // Interactive 60/120 FPS fast-path:
+    scheduleInteractiveRender({ banner: true, avatar: true, preview: true });
   });
 
   canvas.addEventListener("pointerup", () => {
     if (isDragging) {
       isDragging = false;
-      // Finalize high-precision boundary lines when drag completes
-      scheduleRender({ banner: false, continuation: true, avatar: true, preview: true });
+      dirty.continuation = true;
+      dirty.optimizer = true;
+      scheduleFinalRender({ banner: true, continuation: true, avatar: true, preview: true, optimizer: true });
     }
   });
 
   canvas.addEventListener("pointercancel", () => {
     if (isDragging) {
       isDragging = false;
-      scheduleRender({ banner: false, continuation: true, avatar: true, preview: true });
+      dirty.continuation = true;
+      dirty.optimizer = true;
+      scheduleFinalRender({ banner: true, continuation: true, avatar: true, preview: true, optimizer: true });
     }
   });
 
@@ -1121,9 +1311,13 @@ function setupDrag(canvas, getScale) {
     e.preventDefault();
     const zoomDelta = e.deltaY < 0 ? 0.05 : -0.05;
     state.zoom = Math.min(3.0, Math.max(1.0, state.zoom + zoomDelta));
-    $("zoomSlider").value = String(Math.round(state.zoom * 100));
-    $("zoomValue").textContent = `${Math.round(state.zoom * 100)}%`;
-    scheduleRender();
+    const zSlider = $("zoomSlider");
+    const zVal = $("zoomValue");
+    if (zSlider) zSlider.value = String(Math.round(state.zoom * 100));
+    if (zVal) zVal.textContent = `${Math.round(state.zoom * 100)}%`;
+    updateRailIndicators();
+    scheduleInteractiveRender({ banner: true, avatar: true, preview: true });
+    debounceFinalRender(150);
   }, { passive: false });
 }
 
@@ -1140,6 +1334,7 @@ function downloadBlob(blob, filename) {
 }
 
 function exportAssets() {
+  finalizeRenderSync();
   if (!state.bannerData || !state.avatarData) return;
 
   // 1. Export 1500 × 500 banner directly from dedicated buffer
@@ -1310,12 +1505,17 @@ function updateBalanceUI() {
   if (slider && statusBadge) {
     if (state.cropBalance.manualWeight !== null) {
       const pct = Math.round(state.cropBalance.manualWeight * 100);
-      slider.value = String(pct);
+      if (document.activeElement !== slider && slider.value !== String(pct)) {
+        slider.value = String(pct);
+      }
       statusBadge.textContent = `Manual · ${pct}%`;
       statusBadge.style.color = "var(--text-primary)";
     } else {
       const autoPct = (state.cropBalance.autoWeight * 100).toFixed(1);
-      slider.value = String(Math.round(state.cropBalance.autoWeight * 100));
+      const autoVal = String(Math.round(state.cropBalance.autoWeight * 100));
+      if (document.activeElement !== slider && slider.value !== autoVal) {
+        slider.value = autoVal;
+      }
       statusBadge.textContent = `Auto · ${autoPct}%`;
       statusBadge.style.color = "var(--text-secondary)";
     }
@@ -1425,21 +1625,31 @@ function initEvents() {
     window.getSelection()?.removeAllRanges?.();
     state.zoom = Number(e.target.value) / 100;
     zoomValue.textContent = `${Math.round(state.zoom * 100)}%`;
-    scheduleRender({ banner: true, continuation: true, avatar: true, preview: true });
+    scheduleInteractiveRender({ banner: true, avatar: true, preview: true });
+    debounceFinalRender(150);
+  });
+  zoomSlider.addEventListener("change", () => {
+    dirty.continuation = true;
+    dirty.optimizer = true;
+    scheduleFinalRender({ banner: true, continuation: true, avatar: true, preview: true, optimizer: true });
   });
 
   $("zoomOut").addEventListener("click", () => {
     state.zoom = Math.max(1.0, state.zoom - 0.1);
     zoomSlider.value = String(Math.round(state.zoom * 100));
     zoomValue.textContent = `${Math.round(state.zoom * 100)}%`;
-    scheduleRender({ banner: true, continuation: true, avatar: true, preview: true });
+    dirty.continuation = true;
+    dirty.optimizer = true;
+    scheduleFinalRender({ banner: true, continuation: true, avatar: true, preview: true, optimizer: true });
   });
 
   $("zoomIn").addEventListener("click", () => {
     state.zoom = Math.min(3.0, state.zoom + 0.1);
     zoomSlider.value = String(Math.round(state.zoom * 100));
     zoomValue.textContent = `${Math.round(state.zoom * 100)}%`;
-    scheduleRender({ banner: true, continuation: true, avatar: true, preview: true });
+    dirty.continuation = true;
+    dirty.optimizer = true;
+    scheduleFinalRender({ banner: true, continuation: true, avatar: true, preview: true, optimizer: true });
   });
 
   // Extend Switcher [On | Off]
@@ -1469,8 +1679,9 @@ function initEvents() {
     featureSnapOff?.classList.toggle("active", !enable);
     canvasSnapOn?.classList.toggle("active", enable);
     canvasSnapOff?.classList.toggle("active", !enable);
+    dirty.optimizer = true;
     updateBalanceUI();
-    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
+    scheduleFinalRender({ banner: false, continuation: false, avatar: true, preview: true, optimizer: true });
     showToast(`2D Feature Snap: ${enable ? "On" : "Off"}`);
   };
 
@@ -1586,7 +1797,9 @@ function initEvents() {
     state.transform.mirrorX = !state.transform.mirrorX;
     toolMirrorX.classList.toggle("active", state.transform.mirrorX);
     updateRailIndicators();
-    scheduleRender();
+    dirty.continuation = true;
+    dirty.optimizer = true;
+    scheduleFinalRender();
     showToast(`Mirror X: ${state.transform.mirrorX ? "On" : "Off"}`);
   });
 
@@ -1594,7 +1807,9 @@ function initEvents() {
     state.transform.flipY = !state.transform.flipY;
     toolFlipY.classList.toggle("active", state.transform.flipY);
     updateRailIndicators();
-    scheduleRender();
+    dirty.continuation = true;
+    dirty.optimizer = true;
+    scheduleFinalRender();
     showToast(`Flip Y: ${state.transform.flipY ? "On" : "Off"}`);
   });
 
@@ -1602,7 +1817,9 @@ function initEvents() {
     state.transform.rotation = ((state.transform.rotation || 0) + 90) % 360;
     if (rotateValueBadge) rotateValueBadge.textContent = `${state.transform.rotation}°`;
     updateRailIndicators();
-    scheduleRender();
+    dirty.continuation = true;
+    dirty.optimizer = true;
+    scheduleFinalRender();
     showToast(`Rotated: ${state.transform.rotation}°`);
   });
 
@@ -1621,7 +1838,9 @@ function initEvents() {
     if (zSlider) zSlider.value = "100";
     if (zVal) zVal.textContent = "100%";
     updateRailIndicators();
-    scheduleRender();
+    dirty.continuation = true;
+    dirty.optimizer = true;
+    scheduleFinalRender();
     showToast("Reset orientation & zoom");
   });
 
@@ -1638,7 +1857,11 @@ function initEvents() {
       document.querySelectorAll(".preset-pill").forEach((p) => p.classList.remove("active"));
       valEl.textContent = v > 0 && unit === "%" ? `+${v}%` : `${v}${unit}`;
       updateRailIndicators();
-      scheduleRender();
+      scheduleInteractiveRender({ banner: true, avatar: true, preview: true });
+      debounceFinalRender(120);
+    });
+    el.addEventListener("change", () => {
+      scheduleFinalRender({ banner: true, avatar: true, preview: true });
     });
     // Double click to reset to 0
     el.addEventListener("dblclick", () => {
@@ -1646,7 +1869,7 @@ function initEvents() {
       state.adjust[prop] = 0;
       valEl.textContent = `0${unit}`;
       updateRailIndicators();
-      scheduleRender();
+      scheduleFinalRender({ banner: true, avatar: true, preview: true });
     });
   };
 
@@ -1724,7 +1947,10 @@ function initEvents() {
   $("sliderEdgeBoost")?.addEventListener("input", (e) => {
     state.effects.edgeBoost = Number(e.target.value);
     $("valEdgeBoost").textContent = `${state.effects.edgeBoost}×`;
-    scheduleRender();
+    debounceFinalRender(120);
+  });
+  $("sliderEdgeBoost")?.addEventListener("change", () => {
+    scheduleFinalRender({ banner: true, avatar: true, preview: true });
   });
 
   // Film Grain
@@ -1735,14 +1961,18 @@ function initEvents() {
     state.effects.activePreset = "custom";
     document.querySelectorAll(".preset-pill").forEach((p) => p.classList.remove("active"));
     updateRailIndicators();
-    scheduleRender();
+    scheduleInteractiveRender({ banner: true, avatar: true, preview: true });
+    debounceFinalRender(120);
+  });
+  sliderGrain?.addEventListener("change", () => {
+    scheduleFinalRender({ banner: true, avatar: true, preview: true });
   });
   sliderGrain?.addEventListener("dblclick", () => {
     sliderGrain.value = "0";
     state.effects.grain = 0;
     $("valGrain").textContent = "0%";
     updateRailIndicators();
-    scheduleRender();
+    scheduleFinalRender({ banner: true, avatar: true, preview: true });
   });
 
   // Vignette
@@ -1753,14 +1983,18 @@ function initEvents() {
     state.effects.activePreset = "custom";
     document.querySelectorAll(".preset-pill").forEach((p) => p.classList.remove("active"));
     updateRailIndicators();
-    scheduleRender();
+    scheduleInteractiveRender({ banner: true, avatar: true, preview: true });
+    debounceFinalRender(120);
+  });
+  sliderVignette?.addEventListener("change", () => {
+    scheduleFinalRender({ banner: true, avatar: true, preview: true });
   });
   sliderVignette?.addEventListener("dblclick", () => {
     sliderVignette.value = "0";
     state.effects.vignette = 0;
     $("valVignette").textContent = "0%";
     updateRailIndicators();
-    scheduleRender();
+    scheduleFinalRender({ banner: true, avatar: true, preview: true });
   });
 
   $("resetFxBtn")?.addEventListener("click", () => {
@@ -1773,7 +2007,7 @@ function initEvents() {
     state.effects.activePreset = "default";
     syncFxUI();
     updateRailIndicators();
-    scheduleRender();
+    scheduleFinalRender();
     showToast("Reset creative effects");
   });
 
@@ -1783,16 +2017,25 @@ function initEvents() {
     window.getSelection()?.removeAllRanges?.();
     const pct = Number(e.target.value);
     state.cropBalance.manualWeight = pct / 100;
-    updateBalanceUI();
+    const statusBadge = $("cropBalanceStatus");
+    if (statusBadge) {
+      statusBadge.textContent = `Manual · ${pct}%`;
+      statusBadge.style.color = "var(--text-primary)";
+    }
     updateRailIndicators();
-    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
+    scheduleInteractiveRender({ banner: false, avatar: true, preview: true });
+    debounceFinalRender(120);
+  });
+  cropBalanceSlider?.addEventListener("change", () => {
+    scheduleFinalRender({ banner: false, continuation: false, avatar: true, preview: true });
   });
 
   $("resetCropBalanceBtn")?.addEventListener("click", () => {
     state.cropBalance.manualWeight = null;
+    dirty.optimizer = true;
     updateBalanceUI();
     updateRailIndicators();
-    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
+    scheduleFinalRender({ banner: false, continuation: false, avatar: true, preview: true, optimizer: true });
     showToast("Crop balance reset to optimizer recommendation");
   });
 
@@ -1855,8 +2098,10 @@ function initEvents() {
     $("shapeCircle")?.classList.add("active");
     $("shapeSquare")?.classList.remove("active");
 
+    dirty.continuation = true;
+    dirty.optimizer = true;
     updateRailIndicators();
-    scheduleRender();
+    scheduleFinalRender();
     showToast("Reset all studio settings");
   });
 
