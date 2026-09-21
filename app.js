@@ -73,13 +73,24 @@ const bannerBufferCtx = bannerBuffer.getContext("2d", { willReadFrequently: true
 
 const sceneBuffer = document.createElement("canvas");
 sceneBuffer.width = 1500;
-sceneBuffer.height = 750;
+sceneBuffer.height = 800; // Fixed maximum height (eliminates dynamic GPU reallocation)
 const sceneBufferCtx = sceneBuffer.getContext("2d", { willReadFrequently: true });
 
 const avatarBuffer = document.createElement("canvas");
 avatarBuffer.width = 400;
 avatarBuffer.height = 400;
 const avatarBufferCtx = avatarBuffer.getContext("2d", { willReadFrequently: true });
+
+// ── Stage-Separated Dirty Flag Engine ──────────────────────────
+const dirty = {
+  banner: true,
+  continuation: true,
+  avatar: true,
+  preview: true,
+};
+
+let cachedDesktopContinuation = null;
+let cachedMobileContinuation = null;
 
 // ── DOM References ─────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -236,14 +247,22 @@ function applySobelConvolution(imgData, boost = 2, mode = "outline") {
   }
 }
 
-// Analog 35mm film noise
+// Analog 35mm film noise with fast precomputed lookup table
+const NOISE_TABLE_SIZE = 8192;
+const NOISE_TABLE = new Float32Array(NOISE_TABLE_SIZE);
+for (let i = 0; i < NOISE_TABLE_SIZE; i++) {
+  NOISE_TABLE[i] = Math.random() - 0.5;
+}
+
 function applyFilmGrain(imgData, amount) {
   if (amount <= 0) return;
   const d = imgData.data;
   const len = d.length;
   const intensity = (amount / 100) * 36;
+  let noiseIdx = 0;
   for (let i = 0; i < len; i += 4) {
-    const noise = (Math.random() - 0.5) * intensity;
+    const noise = NOISE_TABLE[noiseIdx & (NOISE_TABLE_SIZE - 1)] * intensity;
+    noiseIdx++;
     d[i] = Math.min(255, Math.max(0, d[i] + noise));
     d[i + 1] = Math.min(255, Math.max(0, d[i + 1] + noise));
     d[i + 2] = Math.min(255, Math.max(0, d[i + 2] + noise));
@@ -315,9 +334,7 @@ function updateWorkingBanner() {
   const sceneH = Math.max(500, Math.min(800, Math.ceil(visualBottom)));
   state.sceneH = sceneH;
 
-  // Render extended scene
-  sceneBuffer.width = width;
-  sceneBuffer.height = sceneH;
+  // Render extended scene (fixed buffer size avoids GPU context reallocation)
   sceneBufferCtx.fillStyle = "#000000";
   sceneBufferCtx.fillRect(0, 0, width, sceneH);
 
@@ -391,9 +408,15 @@ function updateWorkingBanner() {
   // Optional Blind-Zone Banner Bridge Pass (Organic & 3D art only)
   if (state.blindZoneBridge && state.target === "shared") {
     applyBlindZoneBridgePass(bannerBufferCtx, state.sceneData);
+    state.bannerData = bannerBufferCtx.getImageData(0, 0, width, bannerH);
+  } else {
+    // Zero-overhead slice: view top 500 rows directly from sceneData (avoids second GPU readback stall)
+    state.bannerData = new ImageData(
+      new Uint8ClampedArray(state.sceneData.data.buffer, 0, width * bannerH * 4),
+      width,
+      bannerH
+    );
   }
-
-  state.bannerData = bannerBufferCtx.getImageData(0, 0, width, bannerH);
 }
 
 // ── Optional Blind-Zone Banner Bridge Pass ───────────────────────
@@ -644,20 +667,27 @@ function updateAvatar() {
   let mapping = null;
   let activeAvatarGeom = dGeom;
 
-  // Feature continuation: active if extend is enabled and scene reaches bottom of image
-  const desktopContinuation = state.extend ? detectBoundaryLines({
-    banner: state.sceneData,
-    bannerRect: sceneRect,
-    avatar: dGeom,
-    sensitivity: 0.58,
-  }) : null;
+  // Feature continuation: cached to eliminate 35ms-80ms Hough accumulator stall per frame
+  if (dirty.continuation) {
+    cachedDesktopContinuation = state.extend ? detectBoundaryLines({
+      banner: state.sceneData,
+      bannerRect: sceneRect,
+      avatar: dGeom,
+      sensitivity: 0.58,
+    }) : null;
 
-  const mobileContinuation = state.extend ? detectBoundaryLines({
-    banner: state.sceneData,
-    bannerRect: sceneRect,
-    avatar: mGeom,
-    sensitivity: 0.58,
-  }) : null;
+    cachedMobileContinuation = state.extend ? detectBoundaryLines({
+      banner: state.sceneData,
+      bannerRect: sceneRect,
+      avatar: mGeom,
+      sensitivity: 0.58,
+    }) : null;
+
+    dirty.continuation = false;
+  }
+
+  const desktopContinuation = cachedDesktopContinuation;
+  const mobileContinuation = cachedMobileContinuation;
 
   let activeContinuation = desktopContinuation;
 
@@ -999,18 +1029,44 @@ function renderMobile() {
   }
 }
 
-// ── Main Render Pipeline ───────────────────────────────────────
+// ── Main Render Pipeline (Stage-Separated Dirty Flag Engine) ───
 let renderPending = false;
-function scheduleRender() {
+function scheduleRender(flags = null) {
+  if (flags) {
+    if (flags.banner !== undefined) dirty.banner = Boolean(flags.banner);
+    if (flags.continuation !== undefined) dirty.continuation = Boolean(flags.continuation);
+    if (flags.avatar !== undefined) dirty.avatar = Boolean(flags.avatar);
+    if (flags.preview !== undefined) dirty.preview = Boolean(flags.preview);
+  } else {
+    // Default: mark all stages dirty if called with no arguments
+    dirty.banner = true;
+    dirty.continuation = true;
+    dirty.avatar = true;
+    dirty.preview = true;
+  }
+
   if (renderPending) return;
   renderPending = true;
   requestAnimationFrame(() => {
     renderPending = false;
     try {
-      updateWorkingBanner();
-      updateAvatar();
-      renderDesktop();
-      renderMobile();
+      if (dirty.banner) {
+        updateWorkingBanner();
+        dirty.banner = false;
+        // When banner changes, avatar and previews must refresh
+        dirty.avatar = true;
+        dirty.preview = true;
+      }
+      if (dirty.avatar) {
+        updateAvatar();
+        dirty.avatar = false;
+        dirty.preview = true;
+      }
+      if (dirty.preview) {
+        renderDesktop();
+        renderMobile();
+        dirty.preview = false;
+      }
     } catch (err) {
       console.error("Render pipeline error:", err);
       showToast("Render error: " + err.message);
@@ -1042,15 +1098,23 @@ function setupDrag(canvas, getScale) {
     const factor = getScale();
     state.panX = initialPanX + dx * factor;
     state.panY = initialPanY + dy * factor;
-    scheduleRender();
+    // Interactive 60/120 FPS fast-path: keep previous boundary continuation while dragging
+    scheduleRender({ banner: true, avatar: true, preview: true, continuation: false });
   });
 
   canvas.addEventListener("pointerup", () => {
-    isDragging = false;
+    if (isDragging) {
+      isDragging = false;
+      // Finalize high-precision boundary lines when drag completes
+      scheduleRender({ banner: false, continuation: true, avatar: true, preview: true });
+    }
   });
 
   canvas.addEventListener("pointercancel", () => {
-    isDragging = false;
+    if (isDragging) {
+      isDragging = false;
+      scheduleRender({ banner: false, continuation: true, avatar: true, preview: true });
+    }
   });
 
   canvas.addEventListener("wheel", (e) => {
@@ -1296,7 +1360,7 @@ function initEvents() {
     }
     localStorage.setItem("headerlock-theme", state.theme);
     showToast(`Theme: ${state.theme === "light" ? "Light" : "Dark"}`);
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
   });
 
   // View Switcher [Both | Desktop | Mobile]
@@ -1314,9 +1378,8 @@ function initEvents() {
     viewBoth.setAttribute("aria-selected", mode === "both" ? "true" : "false");
     viewDesktop.setAttribute("aria-selected", mode === "desktop" ? "true" : "false");
     viewMobile.setAttribute("aria-selected", mode === "mobile" ? "true" : "false");
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: false, preview: true });
   };
-
 
   viewBoth.addEventListener("click", () => setView("both"));
   viewDesktop.addEventListener("click", () => setView("desktop"));
@@ -1334,7 +1397,7 @@ function initEvents() {
     targetMobile.classList.toggle("active", tgt === "mobile");
     updateBalanceUI();
     updateRailIndicators();
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
   };
 
   targetShared.addEventListener("click", () => setTarget("shared"));
@@ -1349,7 +1412,7 @@ function initEvents() {
     state.shape = shape;
     shapeCircle.classList.toggle("active", shape === "circle");
     shapeSquare.classList.toggle("active", shape === "square");
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
   };
 
   shapeCircle.addEventListener("click", () => setShape("circle"));
@@ -1362,21 +1425,21 @@ function initEvents() {
     window.getSelection()?.removeAllRanges?.();
     state.zoom = Number(e.target.value) / 100;
     zoomValue.textContent = `${Math.round(state.zoom * 100)}%`;
-    scheduleRender();
+    scheduleRender({ banner: true, continuation: true, avatar: true, preview: true });
   });
 
   $("zoomOut").addEventListener("click", () => {
     state.zoom = Math.max(1.0, state.zoom - 0.1);
     zoomSlider.value = String(Math.round(state.zoom * 100));
     zoomValue.textContent = `${Math.round(state.zoom * 100)}%`;
-    scheduleRender();
+    scheduleRender({ banner: true, continuation: true, avatar: true, preview: true });
   });
 
   $("zoomIn").addEventListener("click", () => {
     state.zoom = Math.min(3.0, state.zoom + 0.1);
     zoomSlider.value = String(Math.round(state.zoom * 100));
     zoomValue.textContent = `${Math.round(state.zoom * 100)}%`;
-    scheduleRender();
+    scheduleRender({ banner: true, continuation: true, avatar: true, preview: true });
   });
 
   // Extend Switcher [On | Off]
@@ -1387,7 +1450,7 @@ function initEvents() {
     state.extend = enable;
     extendOn.classList.toggle("active", enable);
     extendOff.classList.toggle("active", !enable);
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: true, avatar: true, preview: true });
     showToast(`Feature extension: ${enable ? "On" : "Off"}`);
   };
 
@@ -1407,7 +1470,7 @@ function initEvents() {
     canvasSnapOn?.classList.toggle("active", enable);
     canvasSnapOff?.classList.toggle("active", !enable);
     updateBalanceUI();
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
     showToast(`2D Feature Snap: ${enable ? "On" : "Off"}`);
   };
 
@@ -1429,7 +1492,7 @@ function initEvents() {
     canvasBridgeOn?.classList.toggle("active", enable);
     canvasBridgeOff?.classList.toggle("active", !enable);
     updateBalanceUI();
-    scheduleRender();
+    scheduleRender({ banner: true, continuation: false, avatar: true, preview: true });
     showToast(`Blind-Zone Bridge: ${enable ? "On (Organic Art)" : "Off"}`);
   };
 
@@ -1447,7 +1510,7 @@ function initEvents() {
     guideOverlayOn?.classList.toggle("active", enable);
     guideOverlayOff?.classList.toggle("active", !enable);
     updateBalanceUI();
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: false, preview: true });
     showToast(`12.4° Dual Guide: ${enable ? "On" : "Off"}`);
   };
 
@@ -1722,14 +1785,14 @@ function initEvents() {
     state.cropBalance.manualWeight = pct / 100;
     updateBalanceUI();
     updateRailIndicators();
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
   });
 
   $("resetCropBalanceBtn")?.addEventListener("click", () => {
     state.cropBalance.manualWeight = null;
     updateBalanceUI();
     updateRailIndicators();
-    scheduleRender();
+    scheduleRender({ banner: false, continuation: false, avatar: true, preview: true });
     showToast("Crop balance reset to optimizer recommendation");
   });
 

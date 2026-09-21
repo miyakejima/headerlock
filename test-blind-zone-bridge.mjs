@@ -38,12 +38,12 @@ if (!html.includes('id="canvasBridgeOff" class="dock-pill active"')) {
 }
 console.log("✓ DOM verification: Default state is strictly OFF by default");
 
-// Verify cache buster version bumped to at least 7.4.0 (now 7.5.0)
-if (!html.includes("app.js?v=7.5.0") || !html.includes("styles.css?v=7.5.0")) {
-  console.error("FAIL: Cache buster versions in index.html must be v=7.5.0");
+// Verify cache buster version bumped to at least 7.4.0 (now 7.6.0)
+if (!html.includes("app.js?v=7.6.0") || !html.includes("styles.css?v=7.6.0")) {
+  console.error("FAIL: Cache buster versions in index.html must be v=7.6.0");
   process.exit(1);
 }
-console.log("✓ Cache buster verification: index.html correctly bumped to v=7.5.0");
+console.log("✓ Cache buster verification: index.html correctly bumped to v=7.6.0");
 
 // 2. Mathematical Verification of Blind-Zone Bridge Pass
 const W = 1500, H = 500, sceneH = 680;
